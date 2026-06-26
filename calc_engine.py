@@ -533,7 +533,7 @@ def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capa
         intervals.append((current_start, sorted_dates[-1]))
 
     if not intervals:
-        return "请联系商务支持", f"从{expected_date_str}到{limit_date.strftime('%Y-%m-%d')}均无足够产能"
+        return "请联系商务支持", "请联系商务支持"
 
     # 取最后一个区间，必须包含上限日期
     last_interval = intervals[-1]

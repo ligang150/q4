@@ -508,17 +508,20 @@ async function calculateDate() {
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
             const queueDateInput = document.getElementById('queueDate');
             if (!isDate && calcDate) {
-                queueDateInput.style.display = 'none';
+                // 不隐藏queueDate输入框，保留让用户手动输入排队日期
+                queueDateInput.style.display = '';
+                queueDateInput.disabled = false;
+                queueDateInput.style.background = '';
+                queueDateInput.style.color = '';
+                // 显示提示信息
                 const parent = queueDateInput.parentNode;
                 const oldHint = parent.querySelector('.queue-date-hint');
                 if (oldHint) oldHint.remove();
-                const hint = document.createElement('input');
-                hint.type = 'text';
+                const hint = document.createElement('div');
                 hint.className = 'queue-date-hint';
-                hint.value = '请联系商务支持';
-                hint.disabled = true;
-                hint.style.cssText = 'width:100%;padding:12px 15px;border:1px solid #ddd;border-radius:8px;font-size:15px;background:#fff0f0;color:#e74c3c;font-weight:500;';
-                parent.insertBefore(hint, queueDateInput.nextSibling);
+                hint.textContent = calcDate;
+                hint.style.cssText = 'width:100%;padding:6px 15px;font-size:13px;color:#e74c3c;font-weight:500;margin-bottom:4px;';
+                parent.insertBefore(hint, queueDateInput);
             } else if (isDate) {
                 queueDateInput.style.display = '';
                 queueDateInput.disabled = false;
@@ -565,8 +568,8 @@ async function handleCreateOrder(e) {
     const isCalcDate = calculatedDate && calculatedDate.match(/\d{4}-\d{2}-\d{2}/);
     
     if (!isCalcDate && calculatedDate && calculatedDate !== '计算中...') {
-        // E列不是有效日期（如"请联系商务支持"），F列也写入相同文本
-        queueDate = calculatedDate;
+        // E列不是有效日期（如"请联系商务支持"），使用用户在F列手动输入的值
+        queueDate = queueDateInput.value;
     } else {
         // E列是有效日期，使用F列输入框的值
         queueDate = queueDateInput.value;
