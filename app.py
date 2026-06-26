@@ -1006,7 +1006,9 @@ def calculate_date():
         calculated_date, error_msg = calculate_delivery_date(model, tonnage, expected_date)
         calc_time_ms = round((time.time() - now) * 1000, 2)
 
-        if error_msg:
+        # 如果是"请联系商务支持"，仍需获取row_index以便后续提交排队
+        is_no_capacity = (error_msg == "请联系商务支持")
+        if error_msg and not is_no_capacity:
             return jsonify({
                 "success": False,
                 "error": error_msg,
