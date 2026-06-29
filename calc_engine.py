@@ -8,6 +8,7 @@ from datetime import datetime, date
 import bisect
 import json
 import os
+import pickle
 import re
 import requests
 import time as time_module
@@ -244,7 +245,7 @@ LOW_TRAFFIC_PRELOAD_INTERVAL = 900  # 低峰预加载间隔（15分钟）
 # 按工作表原始A列数据缓存（多个型号共享同一sheet的A列，减少API调用）
 _sheet_date_raw_cache = {}
 _sheet_date_raw_lock = threading.RLock()
-_SHEET_DATE_RAW_TTL = 150  # 2.5分钟，与高峰预加载间隔一致
+_SHEET_DATE_RAW_TTL = 300  # 5分钟，与预加载缓存一致
 
 
 def _set_token_status(status):
@@ -289,6 +290,42 @@ def _set_preload_cache(cache_key, data):
     """写入后台预抓取缓存"""
     with _preload_cache_lock:
         _preload_cache[cache_key] = {"data": data, "ts": time_module.time()}
+
+
+PRELOAD_CACHE_FILE = "/tmp/queue_preload.pkl"
+
+
+def _save_preload_to_disk():
+    try:
+        with _preload_cache_lock:
+            data = {k: v for k, v in _preload_cache.items()}
+        with open(PRELOAD_CACHE_FILE, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print("[disk-cache] saved {} entries".format(len(data)), flush=True)
+    except Exception as e:
+        print(f"[disk-cache] save error: {e}", flush=True)
+
+
+def _load_preload_from_disk():
+    try:
+        if not os.path.exists(PRELOAD_CACHE_FILE):
+            return False
+        with open(PRELOAD_CACHE_FILE, 'rb') as f:
+            data = pickle.load(f)
+        if not data:
+            return False
+        with _preload_cache_lock:
+            _preload_cache.update(data)
+        now = time_module.time()
+        for key in data:
+            entry = data[key]
+            if isinstance(entry, dict) and "data" in entry and "ts" in entry:
+                entry["ts"] = now
+        print("[disk-cache] loaded {} entries".format(len(data)), flush=True)
+        return True
+    except Exception as e:
+        print(f"[disk-cache] load error: {e}", flush=True)
+        return False
 
 
 def _get_sheet_date_raw(sheet_id, start_row, row_count):
@@ -350,12 +387,12 @@ def get_sheet_data(sheet_id, start_row, capacity_col, limit_cell, row_count):
         if preloaded.get("date_capacity_map"):
             return preloaded
 
-    # 2. 如果预加载线程刚启动（5秒内），等待最多3秒让预加载完成
+    # 2. 如果预加载线程刚启动（12秒内），等待最多10秒让预加载完成
     # 解决Render实例休眠后唤醒时，预加载线程与请求并行导致缓存未命中的问题
     if _preload_thread is not None and _preload_thread.is_alive():
         elapsed = time_module.time() - _preload_start_time
-        if elapsed < 5:
-            wait_time = min(3.0, 5.0 - elapsed)
+        if elapsed < 12:
+            wait_time = min(10.0, 12.0 - elapsed)
             print(f"[get_sheet_data] 预加载线程刚启动({elapsed:.1f}s)，等待{wait_time:.1f}s让预加载完成...", flush=True)
             time_module.sleep(wait_time)
             preloaded = _get_preloaded_data(cache_key)
@@ -722,52 +759,150 @@ def _preload_single_model(model, config):
         return False, model, str(e)
 
 
+def _build_sheet_groups():
+    """将型号按工作表分组，用于批量读取。返回 {sheet_id: [(model, config), ...]}"""
+    groups = {}
+    for model, config in MODEL_CONFIG.items():
+        sheet_id = config[0]
+        if sheet_id not in groups:
+            groups[sheet_id] = []
+        groups[sheet_id].append((model, config))
+    return groups
+
+
+def _preload_sheet_batch(sheet_id, models):
+    """批量预加载一个工作表上的所有型号（1次API读全量产能列 + 1次日期列 + 1次上限日期列）
+    API调用从 N×3 降至 3 次（N为同工作表中的型号数）"""
+    min_start = min(c[1] for _, c in models)
+    max_row_count = max(c[4] for _, c in models)
+    max_end = min_start + max_row_count - 1
+
+    date_rows = _get_sheet_date_raw(sheet_id, min_start, max_row_count)
+    if date_rows is None:
+        date_range = f"A{min_start}:A{max_end}"
+        date_grid = read_sheet_range(sheet_id, date_range)
+        date_rows = date_grid.get("rows", [])
+        _set_sheet_date_raw(sheet_id, min_start, max_row_count, date_rows)
+
+    cols = sorted(set(c[2] for _, c in models), key=col_letter_to_index)
+    first_col = cols[0]
+    last_col = cols[-1]
+    cap_range = f"{first_col}{min_start}:{last_col}{max_end}"
+    cap_grid = read_sheet_range(sheet_id, cap_range)
+    cap_rows = cap_grid.get("rows", [])
+
+    col_indices = {col: col_letter_to_index(col) for col in cols}
+    first_col_idx = col_letter_to_index(first_col)
+
+    results = {}
+    for model, config in models:
+        _, start_row, capacity_col, limit_cell, row_count = config
+        cache_key = f"{sheet_id}:{start_row}:{capacity_col}:{limit_cell}"
+
+        existing = _get_preloaded_data(cache_key)
+        if existing is not None:
+            results[model] = True
+            continue
+
+        offset = start_row - min_start
+        cap_col_offset = col_indices[capacity_col] - first_col_idx
+
+        date_capacity_map = {}
+        dates_cached = []
+        end_offset = offset + row_count
+
+        for i in range(max(len(date_rows), len(cap_rows))):
+            d = None
+            if i < len(date_rows) and i < end_offset:
+                date_values = date_rows[i].get("values", [])
+                if date_values:
+                    cv = date_values[0].get("cellValue")
+                    if cv:
+                        date_val = parse_cell_value(cv)
+                        d = parse_date(date_val)
+            dates_cached.append(d)
+
+            if d is not None and i < len(cap_rows) and i < end_offset and offset <= i:
+                cap_values = cap_rows[i].get("values", [])
+                if cap_col_offset < len(cap_values):
+                    cv = cap_values[cap_col_offset].get("cellValue")
+                    if cv:
+                        cap_str = parse_cell_value(cv)
+                        cap_val = parse_number(cap_str)
+                        if cap_val is not None:
+                            date_capacity_map[d] = cap_val
+
+        limit_date = None
+        if limit_cell in _limit_date_cache:
+            limit_date, _ = _limit_date_cache[limit_cell]
+        else:
+            limit_date_str = read_single_cell(sheet_id, limit_cell)
+            limit_date = parse_date(limit_date_str)
+            _limit_date_cache[limit_cell] = (limit_date, time_module.time())
+
+        if date_capacity_map:
+            result = {
+                "date_capacity_map": date_capacity_map,
+                "limit_date": limit_date,
+                "sorted_dates": sorted(date_capacity_map.keys()),
+                "capacities": [date_capacity_map[d] for d in sorted(date_capacity_map.keys())]
+            }
+            _set_preload_cache(cache_key, result)
+            date_col_cache_key = f"{sheet_id}:{start_row}"
+            _set_memory_cache(date_col_cache_key, dates_cached)
+            results[model] = True
+        else:
+            results[model] = False
+
+    return results
+
+
 def _preload_all_models():
-    """预抓取所有型号的产能数据到内存 - 8并发（额度充裕，加速预加载）"""
-    print(f"[preload] 开始预抓取 {len(MODEL_CONFIG)} 个型号（并发8线程）...", flush=True)
+    """预抓取所有型号的产能数据到内存 - 按工作表批量读取，API调用从75次降至约24次"""
+    sheet_groups = _build_sheet_groups()
+    total = len(MODEL_CONFIG)
+    print(f"[preload] 开始预抓取 {total} 个型号（{len(sheet_groups)} 个工作表批处理，并发{len(sheet_groups)}工作表）...", flush=True)
+
     success = 0
     errors = []
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(sheet_groups), 8)) as executor:
         futures = {
-            executor.submit(_preload_single_model, model, config): model
-            for model, config in MODEL_CONFIG.items()
+            executor.submit(_preload_sheet_batch, sheet_id, models): sheet_id
+            for sheet_id, models in sheet_groups.items()
         }
         for future in as_completed(futures):
-            model = futures[future]
+            sheet_id = futures[future]
             try:
-                ok, m, err = future.result()
-                if ok:
-                    success += 1
-                else:
-                    errors.append(f"{m}: {err}")
-                    print(f"[preload] {m} 失败: {err}", flush=True)
+                results = future.result()
+                for model, ok in results.items():
+                    if ok:
+                        success += 1
+                    else:
+                        errors.append(f"{model}: 数据为空")
+                        print(f"[preload] {model} 数据为空", flush=True)
             except Exception as e:
-                errors.append(f"{model}: {e}")
-                print(f"[preload] {model} 异常: {e}", flush=True)
+                errors.append(f"工作表{sheet_id}: {e}")
+                print(f"[preload] 工作表{sheet_id} 异常: {e}", flush=True)
 
-    print(f"[preload] 预抓取完成: {success}/{len(MODEL_CONFIG)} 个型号", flush=True)
+    print(f"[preload] 预抓取完成: {success}/{total} 个型号", flush=True)
     if errors:
         print(f"[preload] 失败详情: {errors[:5]}", flush=True)
     return success
 
 
 def _preload_worker():
-    """后台预抓取工作线程，根据北京时间动态调整间隔
-    优化：应用启动后立即预加载，不等待15秒"""
     first_run = True
     while not _preload_stop_event.is_set():
         try:
             _preload_all_models()
+            _save_preload_to_disk()
             if first_run:
                 print("[preload] 启动时首次预加载完成", flush=True)
                 first_run = False
         except Exception as e:
             print(f"[preload] 预抓取异常: {e}", flush=True)
 
-        # 根据北京时间动态调整间隔：高峰(7-22点)2.5分钟，低峰15分钟
-        # 目标日均约15000次API调用，按工作表共享A列后每轮约38次
-        # 白天360轮×38=13680次，夜间36轮×38=1368次，总计约15048次/天
         hour = datetime.now().hour
         wait_seconds = PRELOAD_INTERVAL if 7 <= hour < 22 else LOW_TRAFFIC_PRELOAD_INTERVAL
         print(f"[preload] 下次预加载等待 {wait_seconds} 秒（当前北京时间 {hour} 点）", flush=True)
@@ -775,11 +910,12 @@ def _preload_worker():
 
 
 def start_preload_thread():
-    """启动后台预抓取线程"""
+    """启动后台预抓取线程（先尝试从磁盘缓存加载）"""
     global _preload_thread, _preload_start_time
     if _preload_thread is not None and _preload_thread.is_alive():
-        return  # 已启动
+        return
 
+    _load_preload_from_disk()
     _preload_stop_event.clear()
     _preload_start_time = time_module.time()
     _preload_thread = threading.Thread(target=_preload_worker, daemon=True)
@@ -832,6 +968,7 @@ def refresh_capacity_data():
     print(f"[refresh] 开始重新预加载 {len(MODEL_CONFIG)} 个型号...", flush=True)
     try:
         success = _preload_all_models()
+        _save_preload_to_disk()
         token_status = get_token_status()
         print(f"[refresh] 刷新完成，成功加载 {success} 个型号，token状态={token_status}", flush=True)
         return success, len(MODEL_CONFIG), "", token_status

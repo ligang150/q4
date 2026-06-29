@@ -1162,7 +1162,8 @@ def calculate_date():
                 "row_index": int(pending_row_index) if pending_row_index else 0
             })
 
-        # 3. 快速确定目标行（非关键路径，失败不影响计算结果）
+        # 3. 快速确定目标行（仅内存操作，不调API）
+        # 行号留给提交阶段确定，计算阶段不阻塞
         target_row = int(pending_row_index) if pending_row_index else 0
         temp_key = f"{submitter_id}"
 
@@ -1173,23 +1174,6 @@ def calculate_date():
                     if now - tracked["timestamp"] < _TEMP_ROW_TIMEOUT:
                         target_row = tracked["row_index"]
 
-        # 如果内存中没有临时行且还有时间，快速扫描表格
-        if target_row == 0 and submitter_id and _elapsed() < MAX_REQUEST_TIME - 3:
-            try:
-                target_row = _find_user_temp_row_in_sheet(submitter_id)
-            except Exception as e:
-                print(f"[calculate_date] _find_user_temp_row_in_sheet 失败: {e}", flush=True)
-                target_row = 0
-
-        # 如果还没找到行号且还有时间，获取下一个空行
-        if target_row == 0 and _elapsed() < MAX_REQUEST_TIME - 2:
-            try:
-                target_row = get_next_empty_row(SHEET_ID, start_from=2, max_batches=2)
-            except Exception as e:
-                print(f"[calculate_date] get_next_empty_row 失败: {e}", flush=True)
-                target_row = 3  # 默认行号
-
-        # 最终兜底
         if target_row == 0:
             target_row = 3
 
