@@ -233,11 +233,11 @@ def auth_check():
 def auth_login():
     """员工号+密码验证"""
     data = request.json
-    employee_id = data.get('employee_id', '')
+    employee_id = normalize_user_key(data.get('employee_id', ''))
     password = data.get('password', '')
     users = read_users()
     for user in users:
-        if user["employee_id"] == employee_id:
+        if normalize_user_key(user["employee_id"]) == employee_id:
             if user["password"] == password:
                 return jsonify({
                     "success": True,
@@ -258,7 +258,7 @@ def auth_users():
     users = read_users()
     return jsonify({
         "success": True,
-        "users": [{"name": u["name"], "employee_id": u["employee_id"]} for u in users]
+        "users": [{"name": u["name"], "employee_id": normalize_user_key(u["employee_id"])} for u in users]
     })
 
 
