@@ -9,7 +9,7 @@ import functools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from calc_engine import MODEL_CONFIG, calculate_delivery_date, set_token_getter, start_preload_thread, refresh_capacity_data
+from calc_engine import MODEL_CONFIG, calculate_delivery_date, set_token_getter, start_preload_thread, refresh_capacity_data, read_single_cell
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
