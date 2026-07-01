@@ -1778,6 +1778,10 @@ def update_order(row_index):
         # 计算可发货日期（用于写入E列）
         calc_date_for_update, calc_error = calculate_delivery_date(model, tonnage, expected_date)
 
+        # 可发货日期为"请联系商务支持"时禁止保存
+        if calc_date_for_update and calc_date_for_update == "请联系商务支持":
+            return jsonify({"success": False, "error": "可发货日期：请联系商务支持，无法保存修改"})
+
         # 验证排队日期 >= 可发货日期
         if calc_date_for_update and is_date_string(calc_date_for_update) and queue_date and is_date_string(queue_date):
             from datetime import datetime
