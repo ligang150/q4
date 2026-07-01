@@ -1313,7 +1313,7 @@ async function handleUpdateOrder(e) {
     // 校验：排队日期不能早于可发货日期
     if (calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/) && queueDate) {
         if (new Date(queueDate) < new Date(calcDate)) {
-            showToast('排队日期不能早于可发货日期', 'error');
+            showToast('排队日期不能早于可发货日期（' + calcDate + '）', 'error');
             return;
         }
     }

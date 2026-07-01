@@ -1776,7 +1776,16 @@ def update_order(row_index):
         # 更新（row_index是1-based，转为0-based）
         write_idx = row_index - 1
         # 计算可发货日期（用于写入E列）
-        calc_date_for_update, _ = calculate_delivery_date(model, tonnage, expected_date)
+        calc_date_for_update, calc_error = calculate_delivery_date(model, tonnage, expected_date)
+
+        # 验证排队日期 >= 可发货日期
+        if calc_date_for_update and is_date_string(calc_date_for_update) and queue_date and is_date_string(queue_date):
+            from datetime import datetime
+            calc_d = datetime.strptime(calc_date_for_update, "%Y-%m-%d").date()
+            queue_d = datetime.strptime(queue_date, "%Y-%m-%d").date()
+            if queue_d < calc_d:
+                return jsonify({"success": False, "error": f"排队日期不能早于可发货日期（{calc_date_for_update}）"})
+
         resp = write_order_row(
             write_idx, model, tonnage, customer, expected_date,
             calc_date_for_update, queue_date, submitter, remark, str(row_index), submitter_id,
