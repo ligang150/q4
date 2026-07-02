@@ -926,13 +926,18 @@ _TEMP_ROW_TIMEOUT = 300  # 5分钟超时（秒）
 _sheet_row_count_cache = {"count": 0}
 _sheet_row_count_lock = threading.Lock()
 
-# 原子行号分配器：多用户并发时每个请求获得唯一行号，杜绝争抢同一行
+# 原子行号分配器：多用户并发时每个请求获得唯一行号
+# 优先填补已有数据范围内的空白行（如删除产生的空洞），无空白时追加新行
 _next_row_counter = {"value": 0, "initialized": False}
 _next_row_lock = threading.Lock()
+from collections import deque
+_gap_queue = deque()
+_gap_lock = threading.Lock()
 
 
 def _scan_max_row_in_a():
-    """并行扫描 A 列找到当前最大数据行号，用于首次初始化计数器"""
+    """并行扫描A列，返回 (max_row, gaps)。
+    max_row 为最后一个有数据的行号，gaps 为 max_row 范围内所有空白行（升序）。"""
     batch_size = 200
     scan_ranges = []
     for s in range(2, 5000, batch_size):
@@ -948,8 +953,10 @@ def _scan_max_row_in_a():
             rows = future.result().get("rows", [])
             batch_results[start] = rows
 
+    # 第一遍：找最大行号
     max_row = 1
-    for start in sorted(batch_results.keys()):
+    sorted_starts = sorted(batch_results.keys())
+    for start in sorted_starts:
         rows = batch_results[start]
         for i, row in enumerate(rows):
             values = row.get("values", [])
@@ -957,19 +964,42 @@ def _scan_max_row_in_a():
                 text = parse_cell_value(values[0]["cellValue"])
                 if text.strip():
                     max_row = max(max_row, start + i)
-    return max_row
+
+    # 第二遍：在 [2, max_row] 范围内收集空白行
+    gaps = []
+    for start in sorted_starts:
+        rows = batch_results[start]
+        for i, row in enumerate(rows):
+            actual_row = start + i
+            if actual_row < 2 or actual_row > max_row:
+                continue
+            values = row.get("values", [])
+            is_empty = (not values or not values[0].get("cellValue")
+                        or not parse_cell_value(values[0]["cellValue"]).strip())
+            if is_empty:
+                gaps.append(actual_row)
+
+    return max_row, gaps
 
 
 def _allocate_row():
     """原子分配新行号，多用户并发安全。
-    首次调用自动扫描当前最大行号初始化计数器。
-    返回唯一的、递增的行号（1-based）。"""
+    优先从空白行队列取（填补空洞），队列空时从 max_row 递增。
+    首次调用时并行扫描整个A列初始化。"""
     with _next_row_lock:
         if not _next_row_counter["initialized"]:
-            max_row = _scan_max_row_in_a()
+            max_row, gaps = _scan_max_row_in_a()
             _next_row_counter["value"] = max_row
             _next_row_counter["initialized"] = True
-            print(f"[allocate] 计数器初始化: 当前最大行={max_row}", flush=True)
+            with _gap_lock:
+                _gap_queue.extend(gaps)
+            print(f"[allocate] 初始化: max_row={max_row}, gaps={len(gaps)}", flush=True)
+
+        # 优先填补空白行
+        with _gap_lock:
+            if _gap_queue:
+                return _gap_queue.popleft()
+
         _next_row_counter["value"] += 1
         return _next_row_counter["value"]
 
