@@ -940,7 +940,9 @@ def _scan_max_row_in_a():
 
     batch_results = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(read_sheet_range, SHEET_ID, f"A{s}:A{e}"): s for s, e in scan_ranges}
+        futures = {}
+        for s, end in scan_ranges:
+            futures[executor.submit(read_sheet_range, SHEET_ID, f"A{s}:A{end}")] = s
         for future in as_completed(futures):
             start = futures[future]
             rows = future.result().get("rows", [])
@@ -1322,7 +1324,9 @@ def fetch_all_orders_raw():
         scan_ranges.append((start, end))
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(_read_batch, SHEET_ID, f"A{s}:A{e}"): (s, e) for s, e in scan_ranges}
+        futures = {}
+        for s, e in scan_ranges:
+            futures[executor.submit(_read_batch, SHEET_ID, f"A{s}:A{e}")] = (s, e)
         for future in as_completed(futures):
             grid_data = future.result()
             rows = grid_data.get("rows", [])
