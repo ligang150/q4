@@ -547,7 +547,8 @@ def batch_update(requests_body):
 
 def ensure_sheet_rows(min_row_count):
     """确保表格至少有 min_row_count 行，不足时自动添加行（每次批量添加500行）
-    带缓存+锁：记住上次表格总行数，避免每次都调用API查询；加锁避免多人同时重复扩容"""
+    带缓存+锁：记住上次表格总行数，避免每次都调用API查询；加锁避免多人同时重复扩容
+    文件信息API失败时使用计数器值兜底估算，不阻塞写入。"""
     # 快速路径：缓存命中直接返回（无锁）
     cached_count = _sheet_row_count_cache.get("count", 0)
     if cached_count >= min_row_count:
@@ -562,28 +563,35 @@ def ensure_sheet_rows(min_row_count):
                 return True
 
             # 先获取当前表格信息
-            url = f"{BASE_URL}/files/{FILE_ID}"
-            resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
-            if resp.status_code != 200:
-                print(f"[WARN] ensure_sheet_rows get file info failed: HTTP {resp.status_code}", flush=True)
-                return False
-            data = resp.json()
-            # 检查腾讯API业务错误
-            if "code" in data and data.get("code") != 0:
-                print(f"[WARN] ensure_sheet_rows Tencent API error: {data.get('code')} {data.get('message','')}", flush=True)
-                return False
-            sheets = data.get("data", {}).get("sheets", [])
             current_row_count = 0
-            for s in sheets:
-                if s.get("sheetID") == SHEET_ID:
-                    current_row_count = s.get("rowCount", 0)
-                    break
+            try:
+                url = f"{BASE_URL}/files/{FILE_ID}"
+                resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "code" in data and data.get("code") != 0:
+                        print(f"[WARN] ensure_sheet_rows Tencent API error: {data.get('code')}", flush=True)
+                    else:
+                        sheets = data.get("data", {}).get("sheets", [])
+                        for s in sheets:
+                            if s.get("sheetID") == SHEET_ID:
+                                current_row_count = s.get("rowCount", 0)
+                                break
+                        if current_row_count <= 0:
+                            for s in sheets:
+                                if s.get("sheetID") == SHEET_ID:
+                                    current_row_count = s.get("gridProperties", {}).get("rowCount", 0)
+                                    break
+                else:
+                    print(f"[WARN] ensure_sheet_rows get file info HTTP {resp.status_code}", flush=True)
+            except Exception as e:
+                print(f"[WARN] ensure_sheet_rows get file info exception: {e}", flush=True)
+
+            # 兜底：API 失败时用计数器值或缓存估算当前行数
             if current_row_count <= 0:
-                for s in sheets:
-                    if s.get("sheetID") == SHEET_ID:
-                        gp = s.get("gridProperties", {})
-                        current_row_count = gp.get("rowCount", 0)
-                        break
+                estimated = _next_row_counter.get("value", 0) if _next_row_counter.get("initialized") else 0
+                current_row_count = max(cached_count, estimated, 2000)
+                print(f"[WARN] ensure_sheet_rows 使用估算行数: {current_row_count}", flush=True)
 
             _sheet_row_count_cache["count"] = current_row_count
 
@@ -609,7 +617,9 @@ def ensure_sheet_rows(min_row_count):
                 result = resp.json()
                 if result.get("ret") == 0 or "responses" in result:
                     _sheet_row_count_cache["count"] = current_row_count + rows_to_add
+                    print(f"[allocate] 扩容成功: +{rows_to_add}行, 总计={_sheet_row_count_cache['count']}", flush=True)
                     return True
+            print(f"[WARN] ensure_sheet_rows 扩容API失败", flush=True)
             return False
     except Exception as e:
         print(f"[WARN] ensure_sheet_rows exception: {e}", flush=True)
@@ -1290,16 +1300,14 @@ def create_order():
         # 原子分配唯一行号
         target_row = _find_first_empty_row_in_column_a()
 
-        # 确保行数足够
-        if not ensure_sheet_rows(target_row + 10):
-            return jsonify({"success": False, "error": "表格扩容失败，请稍后重试"})
+        # 确保行数足够（尽力扩容，静默失败时由写入本身报错）
+        ensure_sheet_rows(target_row + 10)
 
         # 写入前验证目标行为空（兜底 API 压缩漏检的空白行）
         verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
         if verify_val and verify_val.strip():
             target_row = _find_first_empty_row_in_column_a()
-            if not ensure_sheet_rows(target_row + 10):
-                return jsonify({"success": False, "error": "表格扩容失败，请稍后重试"})
+            ensure_sheet_rows(target_row + 10)
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
