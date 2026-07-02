@@ -937,7 +937,8 @@ _gap_lock = threading.Lock()
 
 def _scan_max_row_in_a():
     """并行扫描A列，返回 (max_row, gaps)。
-    max_row 为最后一个有数据的行号，gaps 为 max_row 范围内所有空白行（升序）。"""
+    max_row 为最后一个有数据的行号，gaps 为 [2, max_row] 范围内所有空白行（升序）。
+    处理腾讯API压缩：返回行数少于批次大小时，缺失行视为空白。"""
     batch_size = 200
     scan_ranges = []
     for s in range(2, 5000, batch_size):
@@ -953,9 +954,10 @@ def _scan_max_row_in_a():
             rows = future.result().get("rows", [])
             batch_results[start] = rows
 
+    sorted_starts = sorted(batch_results.keys())
+
     # 第一遍：找最大行号
     max_row = 1
-    sorted_starts = sorted(batch_results.keys())
     for start in sorted_starts:
         rows = batch_results[start]
         for i, row in enumerate(rows):
@@ -965,10 +967,15 @@ def _scan_max_row_in_a():
                 if text.strip():
                     max_row = max(max_row, start + i)
 
-    # 第二遍：在 [2, max_row] 范围内收集空白行
+    # 第二遍：在 [2, max_row] 范围内收集空白行（含 API 压缩的缺失行）
     gaps = []
     for start in sorted_starts:
+        batch_end = start + batch_size - 1
+        if start > max_row:
+            break
         rows = batch_results[start]
+        rows_in_batch = len(rows)
+
         for i, row in enumerate(rows):
             actual_row = start + i
             if actual_row < 2 or actual_row > max_row:
@@ -978,6 +985,14 @@ def _scan_max_row_in_a():
                         or not parse_cell_value(values[0]["cellValue"]).strip())
             if is_empty:
                 gaps.append(actual_row)
+
+        # 处理 API 压缩：返回行数不足时，缺失行视为空白行
+        if rows_in_batch < batch_size:
+            first_missing = start + rows_in_batch
+            last_in_range = min(batch_end, max_row)
+            for empty_row in range(first_missing, last_in_range + 1):
+                if empty_row >= 2:
+                    gaps.append(empty_row)
 
     return max_row, gaps
 
@@ -993,6 +1008,9 @@ def _allocate_row():
             _next_row_counter["initialized"] = True
             with _gap_lock:
                 _gap_queue.extend(gaps)
+            # 预填表格行数缓存，避免首次 ensure_sheet_rows 触发 API 调用
+            if _sheet_row_count_cache["count"] == 0:
+                _sheet_row_count_cache["count"] = max(max_row + 500, 2000)
             print(f"[allocate] 初始化: max_row={max_row}, gaps={len(gaps)}", flush=True)
 
         # 优先填补空白行
@@ -1275,8 +1293,16 @@ def create_order():
         # 原子分配唯一行号
         target_row = _find_first_empty_row_in_column_a()
 
-        # 确保行数足够（缓存命中时O(1)）
-        ensure_sheet_rows(target_row + 10)
+        # 确保行数足够
+        if not ensure_sheet_rows(target_row + 10):
+            return jsonify({"success": False, "error": "表格扩容失败，请稍后重试"})
+
+        # 写入前验证目标行为空（兜底 API 压缩漏检的空白行）
+        verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
+        if verify_val and verify_val.strip():
+            target_row = _find_first_empty_row_in_column_a()
+            if not ensure_sheet_rows(target_row + 10):
+                return jsonify({"success": False, "error": "表格扩容失败，请稍后重试"})
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
