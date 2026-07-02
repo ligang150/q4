@@ -1008,9 +1008,6 @@ def _allocate_row():
             _next_row_counter["initialized"] = True
             with _gap_lock:
                 _gap_queue.extend(gaps)
-            # 预填表格行数缓存，避免首次 ensure_sheet_rows 触发 API 调用
-            if _sheet_row_count_cache["count"] == 0:
-                _sheet_row_count_cache["count"] = max(max_row + 500, 2000)
             print(f"[allocate] 初始化: max_row={max_row}, gaps={len(gaps)}", flush=True)
 
         # 优先填补空白行
