@@ -1097,7 +1097,10 @@ def _get_pending_rows():
 @app.route('/api/calculate-date', methods=['POST'])
 @require_auth
 def calculate_date():
-    """计算可发货日期：直接本地计算，不再写入腾讯表格触发公式"""
+    """计算可发货日期：直接本地计算，不再写入腾讯表格触发公式
+    支持修改排队时的产能补偿：传入original_queue_date和original_tonnage时，
+    会先将原排队日期及之后的产能加回原吨位，再计算可发货日期
+    """
     request_start = time.time()
     MAX_REQUEST_TIME = 8  # 总请求时间上限8秒，超过则快速返回
 
@@ -1110,6 +1113,9 @@ def calculate_date():
         pending_row_index = data.get('pending_row_index', 0)
         submitter_id = (data.get('submitter_id') or '').strip()
         force_refresh = bool(data.get('force_refresh', False))
+        # 修改排队时的产能补偿参数
+        original_queue_date = (data.get('original_queue_date') or '').strip()
+        original_tonnage = data.get('original_tonnage', '')
 
         def _elapsed():
             return time.time() - request_start
@@ -1117,7 +1123,13 @@ def calculate_date():
         now = time.time()
 
         # 1. 缓存快速路径检查（在计算之前）
-        cache_key = f"{model}:{tonnage}:{expected_date}"
+        # 修改排队时有原订单参数时，缓存key需要包含这些参数
+        has_original = bool(original_queue_date and original_tonnage)
+        if has_original:
+            cache_key = f"{model}:{tonnage}:{expected_date}:edit:{original_queue_date}:{original_tonnage}"
+        else:
+            cache_key = f"{model}:{tonnage}:{expected_date}"
+
         if not force_refresh:
             if (_calc_result_cache_app.get("key") == cache_key
                 and _calc_result_cache_app.get("result")
@@ -1130,7 +1142,11 @@ def calculate_date():
                 })
 
         # 2. 核心计算（最关键路径，只做必要的API调用）
-        calculated_date, error_msg = calculate_delivery_date(model, tonnage, expected_date)
+        calculated_date, error_msg = calculate_delivery_date(
+            model, tonnage, expected_date,
+            original_queue_date_str=original_queue_date if has_original else None,
+            original_tonnage_str=original_tonnage if has_original else None
+        )
         calc_time_ms = round((time.time() - now) * 1000, 2)
 
         # 如果是"请联系商务支持"，仍需获取row_index以便后续提交排队
@@ -1774,6 +1790,7 @@ def update_order(row_index):
         if rows:
             orig_values = [parse_cell_value(v.get("cellValue")) for v in rows[0].get("values", [])]
             original_tonnage = orig_values[1] if len(orig_values) > 1 else "0"
+            original_queue_date = orig_values[5] if len(orig_values) > 5 else ""
             original_order = {
                 "submitter": orig_values[6] if len(orig_values) > 6 else "",
                 "submitter_id": orig_values[10] if len(orig_values) > 10 else ""
@@ -1792,7 +1809,13 @@ def update_order(row_index):
         # 更新（row_index是1-based，转为0-based）
         write_idx = row_index - 1
         # 计算可发货日期（用于写入E列）
-        calc_date_for_update, calc_error = calculate_delivery_date(model, tonnage, expected_date)
+        # 修改排队时，如果原订单有排队日期，需要先将原排队日期及之后的产能加回原吨位
+        has_original_queue = bool(original_queue_date and is_date_string(original_queue_date) and original_tonnage)
+        calc_date_for_update, calc_error = calculate_delivery_date(
+            model, tonnage, expected_date,
+            original_queue_date_str=original_queue_date if has_original_queue else None,
+            original_tonnage_str=original_tonnage if has_original_queue else None
+        )
 
         # 可发货日期为"请联系商务支持"时禁止保存
         if calc_date_for_update and calc_date_for_update == "请联系商务支持":

@@ -564,7 +564,18 @@ def _get_model_config(model):
     return None
 
 
-def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
+def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None,
+                                 original_queue_date_str=None, original_tonnage_str=None):
+    """
+    计算可发货日期
+    参数:
+        model: 型号
+        tonnage_str: 吨位
+        expected_date_str: 期望发货日期
+        occupied_capacity: 已占用产能（预留参数）
+        original_queue_date_str: 原排队日期（修改排队时使用，用于产能补偿）
+        original_tonnage_str: 原订单吨位（修改排队时使用，用于产能补偿）
+    """
     config = _get_model_config(model)
     if not config:
         return "请联系商务支持", f"型号 {model} 暂无排产数据，请检查型号是否正确"
@@ -603,6 +614,23 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
         sorted_dates = sorted(date_capacity_map.keys())
         capacities = [date_capacity_map[d] for d in sorted_dates]
 
+    # ========== 修改排队时的产能补偿逻辑 ==========
+    # 如果有原排队日期和原吨位，将原排队日期及之后每天的产能加上原吨位
+    # 原因：已排队的订单已从相应日期的产能中减出，修改排队时需要先把这部分产能加回来
+    original_queue_date = parse_date(original_queue_date_str) if original_queue_date_str else None
+    original_tonnage = parse_number(original_tonnage_str) if original_tonnage_str else None
+
+    if original_queue_date and original_tonnage and original_tonnage > 0:
+        # 复制一份产能数组用于计算，不影响原始缓存数据
+        capacities = list(capacities)
+        # 找到原排队日期在sorted_dates中的位置
+        orig_idx = bisect.bisect_left(sorted_dates, original_queue_date)
+        # 将原排队日期及之后（到上限日期）的所有产能加上原吨位
+        limit_idx = bisect.bisect_right(sorted_dates, limit_date) - 1
+        for k in range(orig_idx, min(limit_idx + 1, len(capacities))):
+            capacities[k] += original_tonnage
+    # ===========================================
+
     i = bisect.bisect_left(sorted_dates, expected_date)
     if i >= len(sorted_dates):
         return "请联系商务支持", "请联系商务支持"
@@ -631,10 +659,21 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
     return result_date.strftime("%Y-%m-%d"), ""
 
 
-def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
-    """计算可发货日期（带计算结果缓存）"""
+def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None,
+                            original_queue_date_str=None, original_tonnage_str=None):
+    """计算可发货日期（带计算结果缓存）
+    参数:
+        original_queue_date_str: 原排队日期（修改排队时使用）
+        original_tonnage_str: 原订单吨位（修改排队时使用）
+    """
     # 1. 计算结果缓存快速路径
-    cache_key = f"{model}:{tonnage_str}:{expected_date_str}"
+    # 注意：修改排队时有原订单参数时，缓存key需要包含这些参数，避免与创建订单的缓存混淆
+    has_original = bool(original_queue_date_str and original_tonnage_str)
+    if has_original:
+        cache_key = f"{model}:{tonnage_str}:{expected_date_str}:edit:{original_queue_date_str}:{original_tonnage_str}"
+    else:
+        cache_key = f"{model}:{tonnage_str}:{expected_date_str}"
+
     now = time_module.time()
     with _calc_result_cache_lock:
         if cache_key in _calc_result_cache:
@@ -643,10 +682,13 @@ def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capa
                 return entry["result"]
 
     # 2. 实际计算
-    result = _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity)
+    result = _do_calculate_delivery_date(
+        model, tonnage_str, expected_date_str, occupied_capacity,
+        original_queue_date_str, original_tonnage_str
+    )
 
-    # 3. 写入缓存（仅成功计算时）
-    if result[0]:  # 有可发货日期或错误提示时缓存
+    # 3. 写入缓存（仅成功计算时缓存；修改排队的结果也缓存，因为同一订单多次修改时可能重复计算）
+    if result[0]:
         with _calc_result_cache_lock:
             _calc_result_cache[cache_key] = {"result": result, "ts": now}
 
