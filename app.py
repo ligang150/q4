@@ -1617,15 +1617,34 @@ def get_filtered_orders(submitter_id, current_user, view_mode, submitter_name=""
         if not can_operate_order(order, current_user, submitter_id, submitter_name, view_mode):
             continue
 
-        # 期望发货日期过滤：仅显示期望发货日期>=今天的订单
-        expected_date_str = order["expected_date"]
+        # 日期过滤：期望发货日期>=今天 或 排队日期>=今天 的订单才显示
+        # 原因：即使期望发货日期已过，如果排队日期还在未来，说明订单仍在排队中
+        expected_date_str = order.get("expected_date", "")
+        queue_date_str = order.get("queue_date", "")
+        expected_date_passed = False
+        has_future_queue_date = False
+
+        # 检查期望发货日期是否已过期
         if expected_date_str:
             try:
                 expected_date = datetime.strptime(expected_date_str, "%Y-%m-%d").date()
                 if expected_date < today:
-                    continue
+                    expected_date_passed = True
             except:
                 pass
+
+        # 检查排队日期是否>=今天
+        if queue_date_str:
+            try:
+                queue_date = datetime.strptime(queue_date_str, "%Y-%m-%d").date()
+                if queue_date >= today:
+                    has_future_queue_date = True
+            except:
+                pass
+
+        # 如果期望发货日期已过期 且 排队日期不在未来（小于今天或为空），则不显示
+        if expected_date_passed and not has_future_queue_date:
+            continue
 
         orders.append(order)
 
@@ -1647,7 +1666,7 @@ def get_filtered_orders(submitter_id, current_user, view_mode, submitter_name=""
 @app.route('/api/orders', methods=['GET'])
 @require_auth
 def get_orders():
-    """获取订单列表：管理员可查看所有或仅自己的；仅显示期望发货日期>=今天的订单；支持分页"""
+    """获取订单列表：管理员可查看所有或仅自己的；显示期望发货日期>=今天 或 排队日期>=今天的订单；支持分页"""
     try:
         if request.args.get('refresh') == '1':
             _orders_cache["timestamp"] = 0  # 标记缓存过期，但不清空数据（降级用）
