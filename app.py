@@ -1069,6 +1069,24 @@ def _allocate_row():
         _next_row_counter["value"] += 1
         return _next_row_counter["value"]
 
+
+def _rescan_empty_rows():
+    """重新扫描A列，修正行号计数器和空白行队列。
+    用于验证发现计数器有偏差时的修正操作。
+    加锁保证并发安全。"""
+    with _next_row_lock:
+        max_row, gaps = _scan_max_row_in_a()
+        _next_row_counter["value"] = max_row
+        _next_row_counter["initialized"] = True
+        with _gap_lock:
+            _gap_queue.clear()
+            _gap_queue.extend(gaps)
+        # 同时清空空行缓存，让下次重新获取
+        global _empty_row_cache
+        _empty_row_cache = {"row": 0, "timestamp": 0}
+        print(f"[allocate] 重新扫描完成: max_row={max_row}, gaps={len(gaps)}", flush=True)
+
+
 def _get_pending_rows():
     """获取所有待处理行（F列为空的行），带缓存"""
     import time
@@ -1359,6 +1377,16 @@ def create_order():
 
         # 确保行数足够（尽力扩容，静默失败时由写入本身报错）
         ensure_sheet_rows(target_row + 10)
+
+        # 写入前验证目标行A列为空（确保数据正确性，防止覆盖已有数据）
+        # 如果验证不通过，重新扫描A列修正计数器后再分配
+        verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
+        if verify_val and verify_val.strip():
+            # 目标行不为空，说明计数器有偏差，重新扫描修正
+            print(f"[create_order] 行{target_row}验证不通过（A列有值：{verify_val}），重新扫描...", flush=True)
+            _rescan_empty_rows()
+            target_row = _find_first_empty_row_in_column_a()
+            ensure_sheet_rows(target_row + 10)
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
