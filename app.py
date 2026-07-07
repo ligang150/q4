@@ -1422,8 +1422,15 @@ def create_order():
         result = resp.json()
 
         if "responses" in result:
-            updated = result["responses"][0].get("updateRangeResponse", {}).get("updatedCells", 0)
-            if updated > 0:
+            responses_list = result["responses"]
+            total_updated = 0
+            all_success = True
+            for r in responses_list:
+                updated = r.get("updateRangeResponse", {}).get("updatedCells", 0)
+                if updated <= 0:
+                    all_success = False
+                total_updated += updated
+            if total_updated > 0 and all_success:
                 # 清理临时行跟踪
                 temp_key = f"{submitter_id}"
                 with _temp_row_lock:
@@ -1431,9 +1438,11 @@ def create_order():
                         del _temp_row_tracker[temp_key]
                 clear_order_caches()
                 return jsonify({"success": True, "message": "订单创建成功", "row": target_row})
-            # 写入0个单元格，将行号放回空白行队列
+            # 部分或全部写入失败：清理已写入的脏数据，回收行号
+            if total_updated > 0:
+                clear_temp_row(target_row)
             _return_row_to_gap(target_row)
-            return jsonify({"success": False, "error": "写入0个单元格"})
+            return jsonify({"success": False, "error": "写入失败，已回收行号"})
         else:
             err_str = json.dumps(result, ensure_ascii=False)
             # 写入失败，将行号放回空白行队列
@@ -1954,8 +1963,16 @@ def update_order(row_index):
         result = resp.json()
 
         if "responses" in result:
-            clear_order_caches()
-            return jsonify({"success": True, "message": "订单修改成功"})
+            responses_list = result["responses"]
+            all_success = True
+            for r in responses_list:
+                if r.get("updateRangeResponse", {}).get("updatedCells", 0) <= 0:
+                    all_success = False
+            if all_success:
+                clear_order_caches()
+                return jsonify({"success": True, "message": "订单修改成功"})
+            else:
+                return jsonify({"success": False, "error": "部分写入失败，请重试"})
         else:
             return jsonify({"success": False, "error": json.dumps(result, ensure_ascii=False)})
 
