@@ -1087,6 +1087,30 @@ def _rescan_empty_rows():
         print(f"[allocate] 重新扫描完成: max_row={max_row}, gaps={len(gaps)}", flush=True)
 
 
+def _return_row_to_gap(row_num):
+    """写入失败时，将行号放回空白行队列，避免浪费行号产生空行。
+    插入到队列的合适位置，保持升序，确保下次分配时优先使用前面的空行。"""
+    if row_num <= 1:
+        return
+    with _gap_lock:
+        # 如果队列中已有这行，跳过
+        if row_num in _gap_queue:
+            return
+        # 插入到合适位置保持升序
+        import bisect
+        # deque 不支持 bisect，转成列表再处理
+        gap_list = list(_gap_queue)
+        bisect.insort(gap_list, row_num)
+        _gap_queue.clear()
+        _gap_queue.extend(gap_list)
+    # 如果行号比当前计数器还小，说明是中间空行，不需要调整计数器
+    # 如果行号等于当前计数器值（最后追加的行），需要回退计数器
+    with _next_row_lock:
+        if _next_row_counter.get("initialized") and _next_row_counter.get("value", 0) == row_num:
+            _next_row_counter["value"] = row_num - 1
+    print(f"[allocate] 行{row_num}写入失败，已放回空白行队列", flush=True)
+
+
 def _get_pending_rows():
     """获取所有待处理行（F列为空的行），带缓存"""
     import time
@@ -1407,12 +1431,23 @@ def create_order():
                         del _temp_row_tracker[temp_key]
                 clear_order_caches()
                 return jsonify({"success": True, "message": "订单创建成功", "row": target_row})
+            # 写入0个单元格，将行号放回空白行队列
+            _return_row_to_gap(target_row)
             return jsonify({"success": False, "error": "写入0个单元格"})
         else:
             err_str = json.dumps(result, ensure_ascii=False)
+            # 写入失败，将行号放回空白行队列
+            _return_row_to_gap(target_row)
             return jsonify({"success": False, "error": err_str})
 
     except Exception as e:
+        # 异常时如果已分配行号，将其放回空白行队列
+        try:
+            target_row
+        except NameError:
+            pass
+        else:
+            _return_row_to_gap(target_row)
         return jsonify({"success": False, "error": str(e)})
 
 
