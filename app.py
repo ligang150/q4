@@ -281,10 +281,16 @@ def _async_init_order_data():
     """异步初始化订单相关数据（行号计数器、表格行数），不阻塞请求"""
     global _order_init_done
     try:
-        # 初始化行号计数器（扫描A列找最大行号和空白行）
-        _find_first_empty_row_in_column_a()
+        # 初始化行号计数器（扫描A列找最大行号和空白行，不分配行号）
+        max_row, gaps = _scan_max_row_in_a()
+        with _next_row_lock:
+            _next_row_counter["value"] = max_row
+            _next_row_counter["initialized"] = True
+            with _gap_lock:
+                _gap_queue.extend(gaps)
+        current_max = max_row
+        print(f"[init] 行号计数器初始化: max_row={max_row}, gaps={len(gaps)}", flush=True)
         # 初始化表格行数缓存（并确保有充足余量）
-        current_max = _next_row_counter.get("value", 0)
         if current_max > 0:
             _do_expand_sheet(current_max + 1000)
         print("[init] 订单数据异步初始化完成", flush=True)
@@ -1061,7 +1067,6 @@ def _allocate_row():
                 _gap_queue.extend(gaps)
             print(f"[allocate] 初始化: max_row={max_row}, gaps={len(gaps)}", flush=True)
 
-        # 优先填补空白行
         with _gap_lock:
             if _gap_queue:
                 return _gap_queue.popleft()
