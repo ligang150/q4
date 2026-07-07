@@ -616,22 +616,20 @@ async function handleCreateOrder(e) {
     let queueDate = '';
     const isCalcDate = calculatedDate && calculatedDate.match(/\d{4}-\d{2}-\d{2}/);
     
-    if (!isCalcDate && calculatedDate && calculatedDate !== '计算中...') {
-        queueDate = queueDateInput.value || calculatedDate;
-    } else {
+    if (isCalcDate) {
         // E列是有效日期，使用F列输入框的值
         queueDate = queueDateInput.value;
+    } else {
+        // 无有效可发货日期（提示语情况），排队日期留空，允许提交
+        queueDate = '';
     }
     
-    // 校验：排队日期必须是有效日期格式
-    const isQueueDate = queueDate && queueDate.match(/^\d{4}-\d{2}-\d{2}$/);
-    if (!isQueueDate) {
-        showToast('请选择有效的排队日期', 'error');
-        return;
-    }
-    
-    // 校验：F列（排队日期）必须 >= E列（可发货日期）
-    if (isCalcDate && isQueueDate) {
+    // 有有效可发货日期时才校验排队日期
+    if (isCalcDate) {
+        if (!queueDate) {
+            showToast('请填写排队日期', 'error');
+            return;
+        }
         const calcDateObj = new Date(calculatedDate);
         const queueDateObj = new Date(queueDate);
         if (queueDateObj < calcDateObj) {

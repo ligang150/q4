@@ -1150,8 +1150,8 @@ def calculate_date():
         )
         calc_time_ms = round((time.time() - now) * 1000, 2)
 
-        # 如果是"请联系商务支持"（产能不足/无排产数据），仍需获取row_index以便后续提交排队
-        is_no_capacity = (calculated_date == "请联系商务支持")
+        # 如果是"请联系商务支持"，仍需获取row_index以便后续提交排队
+        is_no_capacity = (error_msg == "请联系商务支持")
         if error_msg and not is_no_capacity:
             return jsonify({
                 "success": False,
