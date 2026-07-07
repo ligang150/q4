@@ -578,7 +578,7 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
     """
     config = _get_model_config(model)
     if not config:
-        return "请联系商务支持", f"型号 {model} 暂无排产数据，请检查型号是否正确"
+        return "请联系商务支持", f"型号 {model} 暂无排产数据，请提交后联系商务支持"
 
     tonnage = parse_number(tonnage_str)
     if tonnage is None or tonnage <= 0:
