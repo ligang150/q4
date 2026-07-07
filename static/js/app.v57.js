@@ -623,19 +623,21 @@ async function handleCreateOrder(e) {
         queueDate = queueDateInput.value;
     }
     
+    // 校验：排队日期必须是有效日期格式
+    const isQueueDate = queueDate && queueDate.match(/^\d{4}-\d{2}-\d{2}$/);
+    if (!isQueueDate) {
+        showToast('请选择有效的排队日期', 'error');
+        return;
+    }
+    
     // 校验：F列（排队日期）必须 >= E列（可发货日期）
-    if (isCalcDate && queueDate) {
+    if (isCalcDate && isQueueDate) {
         const calcDateObj = new Date(calculatedDate);
         const queueDateObj = new Date(queueDate);
         if (queueDateObj < calcDateObj) {
             showToast('排队日期不能早于可发货日期（' + calculatedDate + '）', 'error');
             return;
         }
-    }
-    
-    if (!queueDate) {
-        showToast('请填写排队日期', 'error');
-        return;
     }
     
     const orderData = {
