@@ -535,13 +535,14 @@ def batch_update(requests_body):
         resp = HTTP.post(url, headers=get_headers(), json=requests_body, timeout=_HTTP_TIMEOUT)
         return resp
     except Exception as e:
-        print(f"[WARN] batch_update exception: {e}", flush=True)
+        err_msg = str(e)
+        print(f"[WARN] batch_update exception: {err_msg}", flush=True)
         # 返回一个模拟的错误响应
         class FakeResp:
             status_code = 500
-            text = str(e)
+            text = err_msg
             def json(self):
-                return {"ret": -1, "error": str(e)}
+                return {"ret": -1, "error": err_msg}
         return FakeResp()
 
 
@@ -604,7 +605,7 @@ def ensure_sheet_rows(min_row_count):
                 "requests": [{
                     "insertDimension": {
                         "range": {
-                            "sheetID": SHEET_ID,
+                            "sheetId": SHEET_ID,
                             "dimension": "ROWS",
                             "startIndex": current_row_count,
                             "endIndex": current_row_count + rows_to_add
