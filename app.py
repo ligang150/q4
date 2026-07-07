@@ -273,12 +273,39 @@ def get_headers():
 
 
 # 预加载线程将在第一个请求时通过 before_request 启动，避免 worker 导入时阻塞
+_order_init_done = False
+_order_init_lock = threading.Lock()
+
+
+def _async_init_order_data():
+    """异步初始化订单相关数据（行号计数器、表格行数），不阻塞请求"""
+    global _order_init_done
+    try:
+        # 初始化行号计数器（扫描A列找最大行号和空白行）
+        _find_first_empty_row_in_column_a()
+        # 初始化表格行数缓存（并确保有充足余量）
+        current_max = _next_row_counter.get("value", 0)
+        if current_max > 0:
+            _do_expand_sheet(current_max + 1000)
+        print("[init] 订单数据异步初始化完成", flush=True)
+    except Exception as e:
+        print(f"[WARN] _async_init_order_data error: {e}", flush=True)
+    finally:
+        _order_init_done = True
 
 
 @app.before_request
 def ensure_preload_started():
     """确保预加载线程已启动（gunicorn 生产环境不会执行 __main__）"""
     start_preload_thread()
+    # 异步初始化订单数据（只执行一次）
+    global _order_init_done
+    if not _order_init_done:
+        with _order_init_lock:
+            if not _order_init_done:
+                _order_init_done = True  # 先标记，避免重复触发
+                t = threading.Thread(target=_async_init_order_data, daemon=True)
+                t.start()
 
 
 def read_users():
@@ -546,61 +573,44 @@ def batch_update(requests_body):
         return FakeResp()
 
 
-def ensure_sheet_rows(min_row_count):
-    """确保表格至少有 min_row_count 行，不足时自动添加行（每次批量添加500行）
-    带缓存+锁：记住上次表格总行数，避免每次都调用API查询；加锁避免多人同时重复扩容
-    文件信息API失败时使用计数器值兜底估算，不阻塞写入。"""
-    # 快速路径：缓存命中直接返回（无锁）
-    cached_count = _sheet_row_count_cache.get("count", 0)
-    if cached_count >= min_row_count:
-        return True
-
-    # 慢速路径：加锁保护，确保只有一个线程执行扩容
+def _do_expand_sheet(min_row_count):
+    """真正执行表格扩容（同步，由后台线程调用）
+    返回 (success, new_count)"""
+    global _async_expand_running
     try:
         with _sheet_row_count_lock:
-            # 双重检查：其他线程可能已经在等待期间完成了扩容
             cached_count = _sheet_row_count_cache.get("count", 0)
             if cached_count >= min_row_count:
-                return True
+                return True, cached_count
 
-            # 先获取当前表格信息
+            # 获取当前表格实际行数
             current_row_count = 0
             try:
                 url = f"{BASE_URL}/files/{FILE_ID}"
                 resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
                 if resp.status_code == 200:
                     data = resp.json()
-                    if "code" in data and data.get("code") != 0:
-                        print(f"[WARN] ensure_sheet_rows Tencent API error: {data.get('code')}", flush=True)
-                    else:
+                    if "code" in data and data.get("code") == 0:
                         sheets = data.get("data", {}).get("sheets", [])
                         for s in sheets:
                             if s.get("sheetID") == SHEET_ID:
-                                current_row_count = s.get("rowCount", 0)
+                                current_row_count = s.get("rowCount", 0) or s.get("gridProperties", {}).get("rowCount", 0)
                                 break
-                        if current_row_count <= 0:
-                            for s in sheets:
-                                if s.get("sheetID") == SHEET_ID:
-                                    current_row_count = s.get("gridProperties", {}).get("rowCount", 0)
-                                    break
-                else:
-                    print(f"[WARN] ensure_sheet_rows get file info HTTP {resp.status_code}", flush=True)
             except Exception as e:
-                print(f"[WARN] ensure_sheet_rows get file info exception: {e}", flush=True)
+                print(f"[WARN] _do_expand_sheet get file info error: {e}", flush=True)
 
-            # 兜底：API 失败时用计数器值或缓存估算当前行数
             if current_row_count <= 0:
                 estimated = _next_row_counter.get("value", 0) if _next_row_counter.get("initialized") else 0
                 current_row_count = max(cached_count, estimated, 2000)
-                print(f"[WARN] ensure_sheet_rows 使用估算行数: {current_row_count}", flush=True)
+                print(f"[WARN] _do_expand_sheet 使用估算行数: {current_row_count}", flush=True)
 
             _sheet_row_count_cache["count"] = current_row_count
 
             if current_row_count >= min_row_count:
-                return True
+                return True, current_row_count
 
-            # 需要添加行数（每次至少加500行，避免频繁调用）
-            rows_to_add = max(500, min_row_count - current_row_count)
+            # 每次至少加1000行，减少扩容频率
+            rows_to_add = max(1000, min_row_count - current_row_count)
             body = {
                 "requests": [{
                     "insertDimension": {
@@ -617,14 +627,43 @@ def ensure_sheet_rows(min_row_count):
             if resp.status_code == 200:
                 result = resp.json()
                 if result.get("ret") == 0 or "responses" in result:
-                    _sheet_row_count_cache["count"] = current_row_count + rows_to_add
-                    print(f"[allocate] 扩容成功: +{rows_to_add}行, 总计={_sheet_row_count_cache['count']}", flush=True)
-                    return True
-            print(f"[WARN] ensure_sheet_rows 扩容API失败", flush=True)
-            return False
+                    new_count = current_row_count + rows_to_add
+                    _sheet_row_count_cache["count"] = new_count
+                    print(f"[allocate] 扩容成功: +{rows_to_add}行, 总计={new_count}", flush=True)
+                    return True, new_count
+            print(f"[WARN] _do_expand_sheet 扩容API失败", flush=True)
+            return False, current_row_count
     except Exception as e:
-        print(f"[WARN] ensure_sheet_rows exception: {e}", flush=True)
-        return False
+        print(f"[WARN] _do_expand_sheet exception: {e}", flush=True)
+        return False, _sheet_row_count_cache.get("count", 0)
+    finally:
+        _async_expand_running = False
+
+
+def _async_expand(min_row_count):
+    """后台异步扩容，不阻塞请求"""
+    global _async_expand_running
+    if _async_expand_running:
+        return  # 已有扩容在执行，跳过
+    _async_expand_running = True
+
+    def _worker():
+        _do_expand_sheet(min_row_count)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
+def ensure_sheet_rows(min_row_count):
+    """确保表格至少有 min_row_count 行（快速无锁版本）
+    提交时只做内存快速检查，不足时触发后台异步扩容，立即返回不阻塞。
+    并发安全：行号由 _next_row_lock 保证唯一性，扩容只增加行数不影响已分配行号。"""
+    cached_count = _sheet_row_count_cache.get("count", 0)
+    if cached_count >= min_row_count:
+        return True
+    # 缓存不足，触发后台异步扩容，立即返回True（让写入尝试执行，失败由写入本身报错）
+    _async_expand(min_row_count + 500)  # 多扩500行留余量
+    return True
 
 
 def is_date_string(value):
@@ -936,6 +975,7 @@ _TEMP_ROW_TIMEOUT = 300  # 5分钟超时（秒）
 # 表格总行数缓存（带锁保护，避免多人同时触发重复扩容）
 _sheet_row_count_cache = {"count": 0}
 _sheet_row_count_lock = threading.Lock()
+_async_expand_running = False  # 标记是否已有异步扩容在执行
 
 # 原子行号分配器：多用户并发时每个请求获得唯一行号
 # 优先填补已有数据范围内的空白行（如删除产生的空洞），无空白时追加新行
@@ -1319,12 +1359,6 @@ def create_order():
 
         # 确保行数足够（尽力扩容，静默失败时由写入本身报错）
         ensure_sheet_rows(target_row + 10)
-
-        # 写入前验证目标行为空（兜底 API 压缩漏检的空白行）
-        verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
-        if verify_val and verify_val.strip():
-            target_row = _find_first_empty_row_in_column_a()
-            ensure_sheet_rows(target_row + 10)
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
