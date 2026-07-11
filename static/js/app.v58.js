@@ -1750,7 +1750,7 @@ async function refreshCapacityData() {
         clearTimeout(timeoutId);
         const data = await r.json();
 
-        // 记录刷新时间，启动冷却倒计时
+        // 记录刷新时间，启动冷却（按钮保持禁用，60秒后恢复）
         lastRefreshCapacityTime = Date.now();
         startRefreshCooldown(btn, originalHTML);
 
@@ -1786,29 +1786,17 @@ async function refreshCapacityData() {
     }
 }
 
-// 启动刷新冷却倒计时，更新按钮状态
+// 启动刷新冷却：按钮保持禁用状态，60秒后自动恢复
 function startRefreshCooldown(btn, originalHTML) {
     if (refreshCooldownTimer) {
-        clearInterval(refreshCooldownTimer);
+        clearTimeout(refreshCooldownTimer);
     }
-    const endTime = lastRefreshCapacityTime + REFRESH_CAPACITY_COOLDOWN;
-
-    function updateCooldown() {
-        const now = Date.now();
-        const remaining = endTime - now;
-        if (remaining <= 0) {
-            clearInterval(refreshCooldownTimer);
-            refreshCooldownTimer = null;
-            btn.disabled = false;
-            btn.innerHTML = originalHTML;
-            return;
-        }
-        const secondsLeft = Math.ceil(remaining / 1000);
-        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> 冷却中(${secondsLeft}s)`;
-    }
-
-    updateCooldown();
-    refreshCooldownTimer = setInterval(updateCooldown, 1000);
+    // 恢复按钮文字，但保持禁用
+    btn.innerHTML = originalHTML;
+    refreshCooldownTimer = setTimeout(() => {
+        btn.disabled = false;
+        refreshCooldownTimer = null;
+    }, REFRESH_CAPACITY_COOLDOWN);
 }
 
 async function checkCacheStatus() {
