@@ -48,6 +48,11 @@ _HTTP_TIMEOUT = 8  # 单个请求8秒超时，平衡速度和稳定性
 # 访问密码
 ACCESS_PASSWORD = os.environ.get('ACCESS_PASSWORD', 'queue2025')
 ADMIN_EMPLOYEE_ID = "20150465"
+
+# 刷新产能限流配置
+REFRESH_CAPACITY_COOLDOWN_SECONDS = 60  # 最小间隔60秒
+_last_refresh_capacity_time = 0
+_refresh_capacity_lock = threading.Lock()
 ADMIN_KEYS = ["TENCENT_ACCESS_TOKEN", "RENDER_API_KEY", "GITHUB_TOKEN"]
 RENDER_API_KEY_BOOTSTRAP = os.environ.get("RENDER_API_KEY", "")
 RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-d8l6eet7vvec73evlu7g")
@@ -2566,7 +2571,19 @@ def diag_calc_engine():
 @require_auth
 def refresh_capacity_data_api():
     """手动刷新产能数据：同步执行，清除所有缓存并重新加载所有型号，返回实际结果"""
+    global _last_refresh_capacity_time
     from calc_engine import _preload_cache, _preload_cache_lock, _memory_cache, _memory_cache_lock
+
+    # 限流检查：最小间隔60秒
+    with _refresh_capacity_lock:
+        now = time.time()
+        elapsed = now - _last_refresh_capacity_time
+        if elapsed < REFRESH_CAPACITY_COOLDOWN_SECONDS:
+            remaining = int(REFRESH_CAPACITY_COOLDOWN_SECONDS - elapsed) + 1
+            return jsonify({
+                "success": False,
+                "error": f"刷新产能过于频繁，请 {remaining} 秒后再试"
+            }), 429
 
     # 获取刷新前缓存状态
     with _preload_cache_lock:
@@ -2576,6 +2593,9 @@ def refresh_capacity_data_api():
 
     try:
         success, total, err_msg, token_status = refresh_capacity_data()
+        # 刷新成功后更新时间
+        with _refresh_capacity_lock:
+            _last_refresh_capacity_time = time.time()
     except Exception as e:
         return jsonify({
             "success": False,
