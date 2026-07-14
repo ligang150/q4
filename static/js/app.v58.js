@@ -543,11 +543,11 @@ async function calculateDate() {
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
             if (!isDate && calcDate) {
                 queueDateInput.style.display = '';
-                queueDateInput.disabled = false;
-                queueDateInput.style.background = '#fff';
+                queueDateInput.disabled = true;
+                queueDateInput.style.background = '#e9ecef';
                 queueDateInput.style.color = '';
-                queueDateInput.style.cursor = 'text';
-                queueDateInput.placeholder = '产能不足，请联系商务支持后填写';
+                queueDateInput.style.cursor = 'not-allowed';
+                queueDateInput.placeholder = '产能不足，请联系商务支持';
                 queueDateInput.value = '';
                 const parent = queueDateInput.parentNode;
                 const oldHint2 = parent.querySelector('.queue-date-hint');

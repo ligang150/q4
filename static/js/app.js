@@ -508,11 +508,14 @@ async function calculateDate() {
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
             const queueDateInput = document.getElementById('queueDate');
             if (!isDate && calcDate) {
-                // 不隐藏queueDate输入框，保留让用户手动输入排队日期
+                // 产能不足，禁止输入排队日期但允许提交
                 queueDateInput.style.display = '';
-                queueDateInput.disabled = false;
-                queueDateInput.style.background = '';
+                queueDateInput.disabled = true;
+                queueDateInput.style.background = '#e9ecef';
                 queueDateInput.style.color = '';
+                queueDateInput.style.cursor = 'not-allowed';
+                queueDateInput.value = '';
+                queueDateInput.placeholder = '产能不足，请联系商务支持';
                 // 显示提示信息
                 const parent = queueDateInput.parentNode;
                 const oldHint = parent.querySelector('.queue-date-hint');
@@ -567,27 +570,25 @@ async function handleCreateOrder(e) {
     let queueDate = '';
     const isCalcDate = calculatedDate && calculatedDate.match(/\d{4}-\d{2}-\d{2}/);
     
-    if (!isCalcDate && calculatedDate && calculatedDate !== '计算中...') {
-        // E列不是有效日期（如"请联系商务支持"），使用用户在F列手动输入的值
+    if (isCalcDate) {
         queueDate = queueDateInput.value;
     } else {
-        // E列是有效日期，使用F列输入框的值
-        queueDate = queueDateInput.value;
+        // 无有效可发货日期（如"请联系商务支持"），排队日期留空，允许提交
+        queueDate = '';
     }
     
-    // 校验：F列（排队日期）必须 >= E列（可发货日期）
-    if (isCalcDate && queueDate) {
+    // 有有效可发货日期时才校验排队日期
+    if (isCalcDate) {
+        if (!queueDate) {
+            showToast('请填写排队日期', 'error');
+            return;
+        }
         const calcDateObj = new Date(calculatedDate);
         const queueDateObj = new Date(queueDate);
         if (queueDateObj < calcDateObj) {
             showToast('排队日期不能早于可发货日期（' + calculatedDate + '）', 'error');
             return;
         }
-    }
-    
-    if (!queueDate) {
-        showToast('请填写排队日期', 'error');
-        return;
     }
     
     const orderData = {
