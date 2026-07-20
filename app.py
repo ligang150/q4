@@ -1454,6 +1454,29 @@ def create_order():
                     all_success = False
                 total_updated += updated
             if total_updated > 0 and all_success:
+                # 写入M列（首次录入吨位）
+                try:
+                    m_col_body = {
+                        "requests": [{
+                            "updateRangeRequest": {
+                                "sheetId": SHEET_ID,
+                                "gridData": {
+                                    "startRow": write_row_idx,
+                                    "startColumn": 12,  # M列 (index 12)
+                                    "rows": [{
+                                        "values": [
+                                            build_cell_value(tonnage, is_number=True),
+                                        ]
+                                    }]
+                                }
+                            }
+                        }]
+                    }
+                    batch_update(m_col_body)
+                    print(f"[create_order] 已写入M列首次录入吨位：{tonnage}，行{target_row}", flush=True)
+                except Exception as m_err:
+                    print(f"[create_order] 写入M列首次录入吨位失败（不影响主流程）：{m_err}", flush=True)
+
                 # 清理临时行跟踪
                 temp_key = f"{submitter_id}"
                 with _temp_row_lock:
